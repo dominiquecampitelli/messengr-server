@@ -10,12 +10,9 @@ import {
 
 import { Socket, Server } from 'socket.io';
 
-interface RoomStatusPayload {
-  status: 'available' | 'full';
-}
-
 interface ChatSocketData {
   userName: string;
+  roomId: string;
 }
 
 interface StatusPayload {
@@ -32,46 +29,64 @@ interface MessagePayload {
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() server: Server;
 
-  private users = new Map<string, string>();
+  private rooms = new Map<string, Map<string, string>>();
 
-  handleConnection(client: Socket<any, any, any, ChatSocketData>) {
-    const status: RoomStatusPayload = {
-      status: this.users.size >= 2 ? 'full' : 'available',
-    };
-
-    client.emit('room-status', status);
-  }
+  handleConnection() {}
 
   handleDisconnect(client: Socket<any, any, any, ChatSocketData>) {
-    const userName = this.users.get(client.id);
-    if (!userName) return;
+    const { roomId, userName } = client.data || {};
+    if (!roomId || !userName) return;
 
-    this.users.delete(client.id);
+    const room = this.rooms.get(roomId);
+    if (!room) return;
 
-    this.emitStatus('user-left', {
+    room.delete(client.id);
+
+    this.server.to(roomId).emit('user-left', {
       user: userName,
       status: 'offline',
     } satisfies StatusPayload);
+
+    if (room.size === 0) {
+      this.rooms.delete(roomId);
+    }
   }
 
   @SubscribeMessage('join')
   handleJoin(
     @ConnectedSocket() client: Socket<any, any, any, ChatSocketData>,
-    @MessageBody() userName: string,
+    @MessageBody() payload: { roomId: string; userName: string },
   ) {
-    if (this.users.size >= 2) {
+    const { roomId, userName } = payload;
+
+    if (!this.rooms.has(roomId)) {
+      this.rooms.set(roomId, new Map());
+    }
+
+    const room = this.rooms.get(roomId)!;
+
+    if (room.size >= 2) {
       client.emit('room-full');
-      client.disconnect();
       return;
     }
 
-    client.data.userName = userName;
-    this.users.set(client.id, userName);
+    room.set(client.id, userName);
 
-    client.broadcast.emit('user-joined', {
+    client.data = {
+      roomId,
+      userName,
+    };
+
+    void client.join(roomId);
+
+    this.server.to(roomId).emit('room-state', {
+      users: Array.from(room.values()),
+    });
+
+    client.to(roomId).emit('user-joined', {
       user: userName,
       status: 'online',
-    });
+    } satisfies StatusPayload);
   }
 
   @SubscribeMessage('newMessage')
@@ -79,20 +94,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket<any, any, any, ChatSocketData>,
     @MessageBody() message: string,
   ) {
-    this.emitMessage({
-      user: client.data.userName,
+    const { roomId, userName } = client.data;
+
+    const payload: MessagePayload = {
+      user: userName,
       message,
-    });
-  }
+    };
 
-  private emitStatus(
-    event: 'user-joined' | 'user-left',
-    payload: StatusPayload,
-  ) {
-    this.server.emit(event, payload);
-  }
-
-  private emitMessage(payload: MessagePayload) {
-    this.server.emit('message', payload);
+    this.server.to(roomId).emit('chat-message', payload);
   }
 }
