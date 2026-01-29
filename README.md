@@ -6,8 +6,6 @@ API WebSocket desenvolvida com NestJS e Socket.IO, responsável pelo gerenciamen
 
 Utilizando npm.
 
-Com npm
-
 ```bash
 npm install
 npm run start
